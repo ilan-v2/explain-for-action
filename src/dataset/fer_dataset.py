@@ -1,0 +1,73 @@
+from torch.utils.data import Dataset, DataLoader
+import os
+from PIL import Image
+
+class FERDataset(Dataset):
+    """
+    Custom dataset for facial expression recognition (FER) tasks.
+    This dataset assumes that images are stored in a directory structure
+    where each subdirectory corresponds to a class label.
+    """
+    
+    def __init__(self, root_dir, transform=None):
+        """
+        Args:
+            root_dir (str): Directory with all the images organized in subdirectories.
+            transform (callable, optional): Optional transform to be applied on a sample.
+        """
+        self.root_dir = root_dir
+        self.transform = transform
+        self.image_paths = []
+        self.labels = []
+
+        self.label_map = {
+            "angry": 0,
+            "disgust": 1,
+            "fear": 2,
+            "happy": 3,
+            "neutral": 4,
+            "sad": 5,
+            "surprise": 6
+        }
+
+        self.inverted_label_map = {v: k for k, v in self.label_map.items()}
+        
+        # Load images and labels from the directory structure
+        for label in os.listdir(root_dir):
+            label_dir = os.path.join(root_dir, label)
+            if os.path.isdir(label_dir):
+                for img_file in os.listdir(label_dir):
+                    img_path = os.path.join(label_dir, img_file)
+                    if os.path.isfile(img_path):
+                        self.image_paths.append(img_path)
+                        self.labels.append(label)
+
+    def _load_raw(self, idx):
+        """Load the PIL image without applying any transforms."""
+        img_path = self.image_paths[idx]
+        if not os.path.exists(img_path):
+            raise FileNotFoundError(f"Missing {img_path}")
+        img = Image.open(img_path).convert("RGB")
+        return img
+        
+    def __len__(self):
+        """
+        Returns the total number of samples in the dataset.
+        """
+        return len(self.image_paths)
+
+    def __getitem__(self, idx):
+        """
+        Args:
+            idx (int): Index of the sample to retrieve.
+        
+        Returns:
+            dict: A dictionary containing the image and its label.
+        """
+        label = self.labels[idx]
+        img = self._load_raw(idx)
+
+        if self.transform:
+            img = self.transform(img)
+
+        return {"pixel_values": img, "label": self.label_map[label]}
