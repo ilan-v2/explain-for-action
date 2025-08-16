@@ -65,13 +65,11 @@ train = FERDataset(root_dir='data/fer-2013/train', transform=train_transforms)
 test = FERDataset(root_dir='data/fer-2013/test', transform=test_transforms)
 
 def collate_fn(batch, processor):
-    img = [item['pixel_values'] for item in batch]
-    labels = [item['label'] for item in batch]
-    processed_img = processor(img)
-    
-    img_tesnor = torch.stack(processed_img['pixel_values'])
-    label_tensor = torch.tensor(labels, dtype=torch.long)
-    return img_tesnor, label_tensor
+    imgs = [item['pixel_values'] for item in batch]
+    labels = torch.tensor([item['label'] for item in batch], dtype=torch.long)
+    out = processor(images=imgs, return_tensors="pt")
+    return out["pixel_values"], labels
+
 
 train_loader = DataLoader(
     train, 
@@ -115,8 +113,8 @@ ltx = LTX(
     img_mean=processor.image_mean,
     img_std=processor.image_std,
     lr=2e-3,
-    lambda_inv=0,
-    lambda_mask=100
+    lambda_inv=1,
+    lambda_mask=1
 )
 
 checkpoints_path = os.path.join(CHECKPOINTS, 'LTX' , EXPLAINED_TYPE)
@@ -144,7 +142,7 @@ logger = TensorBoardLogger(
 )
 
 trainer = Trainer(
-    max_epochs=100,
+    max_epochs=20,
     accelerator='gpu',
     enable_checkpointing=True,
     callbacks=[checkpoint_callback, early_stopping_callback],

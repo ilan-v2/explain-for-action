@@ -19,6 +19,12 @@ class LTXLoss(torch.nn.Module):
         self.inv_loss = 0
         self.smooth_loss = 0
 
+    @staticmethod
+    def _calc_entropy(logits: torch.Tensor) -> torch.Tensor:
+        probs = torch.nn.functional.softmax(logits, dim=1).clamp_min(1e-8)
+        H = -(probs * probs.log()).sum(dim=1).mean()  # entropy
+        return -H
+
     def forward(self,
                 logits_m: torch.Tensor,
                 logits_inv: torch.Tensor,
@@ -33,7 +39,7 @@ class LTXLoss(torch.nn.Module):
 
         # 3. Inversion: encourage misclassification (maximize entropy)
         # take negative pos loss (BCE)
-        self.inv_loss = -self.pred_loss_fn(logits_inv, target)
+        self.inv_loss = self._calc_entropy(logits_inv)
 
         # 4. Smoothness: TV via conv for compactness
         # WIP
@@ -100,26 +106,27 @@ class LTX(LightningModule):
         # returns (upsampled_mask, raw_mask)
         return self.explainer(x)
 
-    def _normalize_masked_image(self, xm):
-        mean = torch.as_tensor(self.img_mean).to(self.device)
-        std = torch.as_tensor(self.img_std).to(self.device)
-        new_xm = xm.clone()
-        new_xm.sub_(mean[None, :, None, None]).div_(std[None, :, None, None])
-        return new_xm
 
     def log_metrics(self, logits_m, logits_inv, target, prefix: str = "train"):
-        self.log(f"{prefix}/pred_loss", self.loss_fn.pred_loss, on_step=False, on_epoch=True)
-        self.log(f"{prefix}/mask_loss", self.loss_fn.mask_loss, on_step=False, on_epoch=True)
-        
+        on_step = True if prefix == "train" else False
+        self.log(f"{prefix}/pred_loss", self.loss_fn.pred_loss, on_step=on_step, on_epoch=True)
+        self.log(f"{prefix}/mask_loss", self.loss_fn.mask_loss, on_step=on_step, on_epoch=True)
+        self.log(f"{prefix}/inv_loss", self.loss_fn.inv_loss, on_step=on_step, on_epoch=True)
+
         # self.log(f"{prefix}/inv_loss", self.loss_fn.inv_loss, on_step=False, on_epoch=True)
         # self.log(f"{prefix}/smooth_loss", self.loss_fn.smooth_loss, on_step=False, on_epoch=True)
 
         # explained accuracy
-        acc = MulticlassAccuracy(num_classes=self.num_classes)
-        acc.update(logits_m, target)
-        self.log(f"{prefix}/pred_accuracy", acc.compute(), on_step=False, on_epoch=True)
-        acc.update(logits_inv, target)
-        self.log(f"{prefix}/inv_accuracy", acc.compute(), on_step=False, on_epoch=True)
+        pred_acc = self._calc_accuracy(self.num_classes, logits_m, target)
+        self.log(f"{prefix}/pred_accuracy", pred_acc, on_step=False, on_epoch=True)
+        inv_acc = self._calc_accuracy(self.num_classes, logits_inv, target)
+        self.log(f"{prefix}/inv_accuracy", inv_acc, on_step=False, on_epoch=True)
+
+    @staticmethod
+    def _calc_accuracy(num_classes, logits, target):
+        acc = MulticlassAccuracy(num_classes=num_classes)
+        acc.update(logits, target)
+        return acc.compute()
 
     def _eval(self,x,y,mode):
         # 1. get mask
@@ -128,13 +135,6 @@ class LTX(LightningModule):
         # 2. form masked and inverted inputs
         xm = x * up_mask  # upsampled mask
         x_inv = x * (1 - up_mask)
-
-        # Normalize masked images for explained model
-        if isinstance(self.explainer, CNNExplainer):
-            # For cnn - normalize mask
-            # TODO: make subclass for CNN and ViT
-            xm = self._normalize_masked_image(xm)
-            x_inv = self._normalize_masked_image(x_inv)
 
         # 3. feed through explained model
         logits_m = self.explained(xm)
@@ -158,6 +158,5 @@ class LTX(LightningModule):
         return loss
 
     def configure_optimizers(self):
-        # add a scheduler if needed
-        return torch.optim.AdamW(self.parameters(), lr=self.hparams.lr)
-    
+        params = (p for p in self.parameters() if p.requires_grad)
+        return torch.optim.AdamW(params, lr=self.hparams.lr)

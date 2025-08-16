@@ -1,14 +1,18 @@
 import torch
-from pytorch_lightning import LightningModule
 from torch import nn
 from torchvision.models import DenseNet, ResNet
 
 
-class CNNExplainer(LightningModule):
+class CNNExplainer(nn.Module):
     """
     Creating a visual explanation model for CNNs.
     """
-    def __init__(self, cnn_model, activation_function: str = "sigmoid", img_size: int = 224):
+    def __init__(
+            self, 
+            cnn_model, 
+            activation_function: str = "sigmoid", 
+            img_size: int = 224
+            ):
         super().__init__()
         self.img_size = img_size
         self.activation_function = activation_function
@@ -23,7 +27,6 @@ class CNNExplainer(LightningModule):
 
     def forward(self, inputs):  # inputs.shape: [batch_size, 3, 224, 224]
         batch_size = inputs.shape[0]
-        self.encoder.eval()
         enc_rep = self.encoder(inputs)
         mask = self.bottleneck(enc_rep)
         if self.activation_function == 'sigmoid':
@@ -31,7 +34,8 @@ class CNNExplainer(LightningModule):
 
         interpolated_mask = torch.nn.functional.interpolate(
             tokens_mask,
-            scale_factor=int(inputs.shape[-1] / mask.shape[-1]),
+            size=(self.img_size, self.img_size),
+            align_corners=False,
             mode="bilinear"
         )
         interpolated_mask = interpolated_mask.view(
