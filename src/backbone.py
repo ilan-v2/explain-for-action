@@ -2,28 +2,28 @@ from abc import ABC
 from transformers import AutoModel, AutoImageProcessor
 import torch
 
-dinov2 = AutoModel.from_pretrained('facebook/dinov2-small')
-dinov2_processor = AutoImageProcessor.from_pretrained('facebook/dinov2-small',use_fast=True)
-
 class Backbone(ABC):
     def __init__(self, model, processor):
         self.model = model
         self.processor = processor
+        self.processing_mean = None
+        self.processing_std = None
     
     def collate_fn(self, batch):
         raise NotImplementedError("This method should be implemented by subclasses.")
 
-class DinoBackbone(Backbone):
-    def __init__(self):
-        model = dinov2
-        processor = dinov2_processor
+class HuggingFaceViT(Backbone):
+    def __init__(self, model_str='facebook/dinov2-small'):
+        model = AutoModel.from_pretrained(model_str)
+        processor = AutoImageProcessor.from_pretrained(model_str, use_fast=True)
+        self.processing_mean = processor.image_mean
+        self.processing_std = processor.image_std
         super().__init__(model, processor)
     
-    def collate_fn(self, batch):
-        img = [item['pixel_values'] for item in batch]
-        labels = [item['label'] for item in batch]
-        processed_img = self.processor(img)
-        
-        img_tensor = torch.stack(processed_img['pixel_values'])
-        label_tensor = torch.tensor(labels, dtype=torch.long)
-        return img_tensor, label_tensor
+    
+# TODO: not finished yet
+class PytorchCNN(Backbone):
+    def __init__(self, model):
+        self.model = model
+        processor = None
+        super().__init__(model, processor)

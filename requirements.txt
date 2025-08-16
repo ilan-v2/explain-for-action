@@ -1,0 +1,6 @@
+transformers
+timm
+torchvision
+torch
+numpy
+matplotlib

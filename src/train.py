@@ -1,17 +1,14 @@
-import logging
-from lightning.pytorch import Trainer
-from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping
-from lightning.pytorch.loggers import TensorBoardLogger
-from torch.utils.data import DataLoader
-from paths import TRAIN, TEST, CHECKPOINTS, LOGS
-import torch
-
-# import logging
-
-
-from backbone import DinoBackbone
-from models import FERClassifier
 from dataset.fer_dataset import FERDataset
+from explained.models import FERClassifier
+from paths import TRAIN, TEST, CHECKPOINTS, LOGS
+
+import os
+from explainer.cnn_explainer import CNNExplainer
+from cf_explainer import LTX
+
+from torch.utils.data import DataLoader, Dataset
+import torch
+from torchvision import models
 
 from torchvision.transforms.v2 import(
     CenterCrop,  
@@ -22,87 +19,144 @@ from torchvision.transforms.v2 import(
     RandomHorizontalFlip, 
     RandomAdjustSharpness,  
     Resize,  
-    ToTensor
+    ToImage
 )
+
+from lightning.pytorch import LightningModule, Trainer
+from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping
+from lightning.pytorch.loggers import TensorBoardLogger
+
+from transformers import AutoModel, AutoImageProcessor, AutoModelForImageClassification
+from transformers import get_linear_schedule_with_warmup
+
+from functools import partial
+from tqdm import tqdm
+import copy
+
+import matplotlib.pyplot as plt
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
+device
 
-train = FERDataset(root_dir = TRAIN)
-test = FERDataset(root_dir = TEST)
 
-backbone = DinoBackbone()
+# TODO: put in config or some other place
+img_size = 224
+batch_size = 32
 
-size = backbone.processor.size['shortest_edge']
-train_transforms = Compose([
-    Resize((size, size)),
-    RandomRotation(degrees=90),
-    RandomAdjustSharpness(sharpness_factor=2.0),
-    RandomHorizontalFlip(0.5),
-])
 
-test_transforms = Compose([
-    Resize((size, size)),
-])
+processor = AutoImageProcessor.from_pretrained("microsoft/resnet-18", use_fast=True)
 
-train.transform = train_transforms
-test.transform = test_transforms
+train_transforms = Compose(
+    [
+        Resize((img_size, img_size)),
+        # RandomRotation(90),
+        # RandomAdjustSharpness(2),   
+        # RandomHorizontalFlip(0.5),
+    ]
+)
+
+test_transforms = Compose(
+    [
+        Resize((img_size, img_size))
+    ]
+)
+
+train = FERDataset(root_dir='data/fer-2013/train', transform=train_transforms)
+test = FERDataset(root_dir='data/fer-2013/test', transform=test_transforms)
+
+def collate_fn(batch, processor):
+    img = [item['pixel_values'] for item in batch]
+    labels = [item['label'] for item in batch]
+    processed_img = processor(img)
+    
+    img_tesnor = torch.stack(processed_img['pixel_values'])
+    label_tensor = torch.tensor(labels, dtype=torch.long)
+    return img_tesnor, label_tensor
 
 train_loader = DataLoader(
-    train,
-    batch_size=32,
-    shuffle=True,
-    collate_fn=backbone.collate_fn,
+    train, 
+    batch_size=batch_size, 
     num_workers=4,
-    persistent_workers=True
+    shuffle=True, 
+    persistent_workers=True,
+    collate_fn=partial(collate_fn, processor=processor)
 )
-
 test_loader = DataLoader(
-    test,
-    batch_size=32,
-    shuffle=False,
-    collate_fn=backbone.collate_fn,
+    test, 
+    batch_size=batch_size, 
+    shuffle=False, 
     num_workers=4,
-    persistent_workers=True
+    persistent_workers=True,
+    collate_fn=partial(collate_fn, processor=processor)
 )
 
-classifier = FERClassifier(backbone.model)
 
+EXPLAINED_TYPE = 'cnn'  # or 'vit' for ViT-based explainers
+
+explain_backbone = models.resnet18(weights='IMAGENET1K_V1')
+checkpoints_path = os.path.join(CHECKPOINTS,EXPLAINED_TYPE)
+explained_model = FERClassifier.load_from_checkpoint(
+    checkpoint_path=os.path.join(checkpoints_path, "best-checkpoint.ckpt"), 
+    backbone=explain_backbone, 
+    backbone_type=EXPLAINED_TYPE
+)
+
+explainer = CNNExplainer(
+    cnn_model=copy.deepcopy(explained_model.backbone),
+    activation_function='sigmoid',
+    img_size=img_size
+)
+
+ltx = LTX(
+    explained_model=explained_model,
+    explainer=explainer,
+    activation_function='sigmoid',
+    img_size=img_size,
+    img_mean=processor.image_mean,
+    img_std=processor.image_std,
+    lr=2e-3,
+    lambda_inv=0,
+    lambda_mask=100
+)
+
+checkpoints_path = os.path.join(CHECKPOINTS, 'LTX' , EXPLAINED_TYPE)
 checkpoint_callback = ModelCheckpoint(
-    dirpath=CHECKPOINTS,
+    dirpath=checkpoints_path,
     filename='best-checkpoint',
-    monitor='val_loss',
+    monitor='val/loss',
     mode='min',
     save_top_k=1,
+    enable_version_counter=False
 )
 
+logs_path = os.path.join(LOGS, 'LTX', EXPLAINED_TYPE)
+
 early_stopping_callback = EarlyStopping(
-    monitor='val_loss',
-    patience=5,  # Stop training if no improvement for 3 epochs
+    monitor='val/loss',
+    patience=10,  # Stop training if no improvement for 3 epochs
     mode='min',  # We want to minimize the validation loss
     verbose=False,
     check_finite=True
 )
 
 logger = TensorBoardLogger(
-    LOGS
+    logs_path
 )
 
 trainer = Trainer(
-    max_epochs=20,
+    max_epochs=100,
     accelerator='gpu',
     enable_checkpointing=True,
     callbacks=[checkpoint_callback, early_stopping_callback],
     logger=logger
 )
 
+
 if __name__ == "__main__":
-    # silence logging from transformers library
-    logging.getLogger("transformers").setLevel(logging.ERROR)
-
-    torch.set_float32_matmul_precision('high')
+    torch.set_float32_matmul_precision('medium')
     trainer.fit(
-        model=classifier,
+        model=ltx,
         train_dataloaders=train_loader,
-        val_dataloaders=test_loader
+        val_dataloaders=test_loader,
+        # ckpt_path=os.path.join(checkpoints_path, 'best-checkpoint.ckpt')
     )
-
